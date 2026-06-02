@@ -1,213 +1,241 @@
-import { Link, NavLink, Route, Routes, useParams } from 'react-router-dom'
-import { gameCatalog } from './data/games'
-import { firebaseReady } from './lib/firebase'
+import { useEffect, useState } from 'react'
+import {
+  GoogleAuthProvider,
+  OAuthProvider,
+  createUserWithEmailAndPassword,
+  onAuthStateChanged,
+  sendPasswordResetEmail,
+  signInWithEmailAndPassword,
+  signInWithPopup,
+  signOut,
+  updateProfile,
+} from 'firebase/auth'
+import { doc, serverTimestamp, setDoc } from 'firebase/firestore'
+import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom'
+import { LanguageSelector } from './components/LanguageSelector'
+import { auth, db, firebaseReady } from './lib/firebase'
+import { useI18n } from './i18n/I18nProvider'
 
-const sections = [
-  {
-    title: 'Actividades de Diagnóstico',
-    text: 'Juegos cortos al inicio de la clase para descubrir qué saben tus alumnos antes de empezar un tema.',
-  },
-  {
-    title: 'Práctica Formativa',
-    text: 'Dinámicas interactivas a mitad de unidad para fijar conceptos y aprender a partir del error.',
-  },
-  {
-    title: 'Quizes Temáticos',
-    text: 'Cuestionarios ágiles y divertidos para cerrar la clase y medir la retención en segundos.',
-  },
-  {
-    title: 'Desafíos de Gamificación',
-    text: 'Competiciones sanas en el aula con puntos, récords y logros que impulsan la participación.',
-  },
-]
+const providerFactories = {
+  google: () => new GoogleAuthProvider(),
+  microsoft: () => new OAuthProvider('microsoft.com'),
+  apple: () => new OAuthProvider('apple.com'),
+}
 
-const styles = [
-  {
-    title: 'Moderno & Vectorial',
-    text: 'Limpio, fluido y profesional para secundaria, bachillerato y universidad.',
-  },
-  {
-    title: 'Aventura Retro',
-    text: 'Pixel-art 8 y 16 bits con nostalgia arcade para hacer el aprendizaje memorable.',
-  },
-  {
-    title: 'Temático Infantil',
-    text: 'Colorido, amigable y legible para primaria y primeros ciclos.',
-  },
-  {
-    title: 'Corporativo / Serio',
-    text: 'Minimalista y sobrio para capacitación empresarial y onboarding.',
-  },
-]
+function getAuthErrorMessage(authError, copy, providerId) {
+  const providerHint = copy.auth.providers.find((item) => item.id === providerId)?.hint || copy.auth.authMissing
 
-const steps = [
-  'Selecciona la dinámica: plataformas, trivia rápida o carrera contra el tiempo.',
-  'Define el objetivo educativo: preguntas, verdadero/falso, ejercicios o conceptos clave.',
-  'Elige la estética: sprites, fondos e interfaz para tu grupo.',
-  'Comparte el link: acceso instantáneo desde móvil, tablet o computadora.',
-]
+  switch (authError?.code) {
+    case 'auth/unauthorized-domain':
+      return copy.auth.unauthorizedDomain
+    case 'auth/popup-blocked':
+      return copy.auth.popupBlocked
+    case 'auth/popup-closed-by-user':
+    case 'auth/cancelled-popup-request':
+      return copy.auth.popupClosed
+    case 'auth/operation-not-allowed':
+      return providerHint
+    default:
+      return authError?.message || copy.auth.authMissing
+  }
+}
 
-function Shell({ children }) {
+const adminAllowlist = new Set(
+  (import.meta.env.VITE_ADMIN_EMAILS ?? '')
+    .split(',')
+    .map((email) => email.trim().toLowerCase())
+    .filter(Boolean),
+)
+
+function syncUserProfile(user, providerId, created = false) {
+  if (!db || !user) return Promise.resolve()
+
+  return setDoc(
+    doc(db, 'users', user.uid),
+    {
+      uid: user.uid,
+      email: user.email ?? '',
+      displayName: user.displayName ?? '',
+      photoURL: user.photoURL ?? '',
+      providerId,
+      role: 'teacher',
+      lastLoginAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+      ...(created ? { createdAt: serverTimestamp() } : {}),
+    },
+    { merge: true },
+  )
+}
+
+function AccessNotice({ eyebrow, title, text, ctaLabel, ctaTo = '/login' }) {
   return (
-    <div className="app-shell">
-      <header className="topbar">
-        <Link to="/" className="brand">
+    <section className="section panel access-gate">
+      <div className="access-gate-copy">
+        <span className="eyebrow">{eyebrow}</span>
+        <h1>{title}</h1>
+        <p>{text}</p>
+        <div className="access-gate-actions">
+          <Link to={ctaTo} className="button primary">
+            {ctaLabel}
+          </Link>
+        </div>
+      </div>
+    </section>
+  )
+}
+
+function Shell({ children, user, isAdminUser, onSignOut }) {
+  const { copy } = useI18n()
+  const { nav } = copy
+
+  return (
+    <div className="app-shell app-shell-light">
+      <header className="topbar kahoot-topbar">
+        <Link to="/" className="brand kahoot-brand">
           <span className="brand-mark">W</span>
           <span>
-            <strong>Wigadu</strong>
-            <small>La plataforma donde el contenido educativo se convierte en juego.</small>
+            <strong>{copy.brand.name}</strong>
+            <small>{copy.brand.tagline}</small>
           </span>
         </Link>
 
-        <nav className="nav">
-          <NavLink to="/" end>Inicio</NavLink>
-          <NavLink to="/games">Juegos</NavLink>
-          <NavLink to="/dashboard">Dashboard</NavLink>
-          <NavLink to="/admin">Admin</NavLink>
-          <NavLink to="/login" className="nav-cta">Entrar</NavLink>
+        <nav className="nav kahoot-nav">
+          <div className="nav-primary">
+            <Link to="/#juegos" className="nav-link nav-main-link">
+              {nav.games}
+            </Link>
+            <Link to="/#precios" className="nav-link nav-main-link">
+              {nav.prices}
+            </Link>
+            <Link to="/#historias" className="nav-link nav-main-link">
+              {nav.stories}
+            </Link>
+            <Link to="/#acerca" className="nav-link nav-main-link">
+              {nav.about}
+            </Link>
+          </div>
+
+          <div className="nav-actions">
+            {user ? (
+              <>
+                <Link to="/dashboard" className="nav-link nav-main-link">
+                  {nav.dashboard}
+                </Link>
+                {isAdminUser ? (
+                  <Link to="/admin" className="nav-link nav-main-link">
+                    {nav.admin}
+                  </Link>
+                ) : null}
+                <button className="nav-cta nav-button" type="button" onClick={onSignOut}>
+                  {nav.logout}
+                </button>
+              </>
+            ) : (
+              <>
+                <Link to="/login" className="nav-cta nav-button">
+                  {nav.startFree}
+                </Link>
+                <Link to="/login" className="nav-link nav-main-link">
+                  {nav.login}
+                </Link>
+              </>
+            )}
+            <LanguageSelector variant="topbar" />
+          </div>
         </nav>
       </header>
 
       <main>{children}</main>
-
-      <footer className="footer">
-        <div>
-          <strong>Wigadu</strong>
-          <p>Aprendizaje interactivo para educación y capacitación.</p>
-        </div>
-        <p>Firebase-ready · React + Vite · Play online o descarga tus juegos.</p>
-      </footer>
     </div>
   )
 }
 
 function Landing() {
+  const { copy } = useI18n()
+  const { landing } = copy
+
   return (
     <>
-      <section className="hero panel">
-        <div className="hero-copy">
-          <span className="eyebrow">Aprender jugando, sin instalar nada</span>
-          <h1>Crea experiencias de aprendizaje interactivas en minutos.</h1>
-          <p>
-            Transforma tus quizes, lecciones y actividades formativas en videojuegos dinámicos.
-            Elige el estilo visual que prefieras y haz que estudiantes y equipos aprendan jugando.
-          </p>
-          <div className="hero-actions">
-            <Link to="/login" className="button primary">Diseñar una Actividad Gratis</Link>
-            <Link to="/games" className="button secondary">Ver Juegos</Link>
-          </div>
-          <div className="hero-badges">
-            <span>Capacitación</span>
-            <span>Estudiantes</span>
-            <span>Online / descarga</span>
-          </div>
-        </div>
-
-        <div className="hero-card">
-          <div className="preview-window">
-            <div className="preview-top">
-              <span />
-              <span />
-              <span />
-            </div>
-            <div className="preview-body">
-              <div className="preview-game">
-                <div>
-                  <p>Juego destacado</p>
-                  <h3>Reto Arcade</h3>
-                </div>
-                <span className="pill">Play now</span>
-              </div>
-              <div className="preview-grid">
-                <article>
-                  <strong>12</strong>
-                  <span>Preguntas</span>
-                </article>
-                <article>
-                  <strong>4</strong>
-                  <span>Estilos</span>
-                </article>
-                <article>
-                  <strong>Online</strong>
-                  <span>Sin registro</span>
-                </article>
-                <article>
-                  <strong>Firebase</strong>
-                  <span>Listo para crecer</span>
-                </article>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section className="section panel">
-        <div className="section-heading">
-          <span className="eyebrow">Más allá del examen tradicional</span>
-          <h2>Formatos pensados para toda la ruta de aprendizaje.</h2>
-        </div>
-        <div className="card-grid four-up">
-          {sections.map((item) => (
-            <article key={item.title} className="info-card">
-              <h3>{item.title}</h3>
-              <p>{item.text}</p>
-            </article>
-          ))}
-        </div>
-      </section>
-
-      <section className="section panel">
-        <div className="section-heading">
-          <span className="eyebrow">Elige la estética</span>
-          <h2>Una sola plataforma, distintos lenguajes visuales.</h2>
-        </div>
-        <div className="card-grid four-up">
-          {styles.map((item) => (
-            <article key={item.title} className="style-card">
-              <h3>{item.title}</h3>
-              <p>{item.text}</p>
-            </article>
-          ))}
-        </div>
-      </section>
-
-      <section className="section panel split">
-        <div>
-          <span className="eyebrow">Cómo funciona</span>
-          <h2>Un flujo simple, pensado para docentes y equipos de capacitación.</h2>
-          <div className="timeline">
-            {steps.map((step, index) => (
-              <div key={step} className="timeline-item">
-                <span>{index + 1}</span>
-                <p>{step}</p>
-              </div>
+      <section className="hero kahoot-hero">
+        <div className="hero-copy kahoot-hero-copy">
+          <h1>{landing.heroTitle}</h1>
+          <p>{landing.heroText}</p>
+          <div className="hero-badges kahoot-badges">
+            {landing.heroBadges.map((badge) => (
+              <span key={badge}>{badge}</span>
             ))}
           </div>
         </div>
-        <aside className="benefit-box">
-          <span className="eyebrow">Beneficio pedagógico</span>
-          <h3>Evaluación formativa invisible.</h3>
-          <p>
-            Obtén datos en tiempo real del progreso mientras el alumno siente que está superando un nivel.
-          </p>
-          <ul>
-            <li>Feedback inmediato</li>
-            <li>Accesibilidad y carga ligera</li>
-            <li>Funciona en cualquier dispositivo</li>
-          </ul>
-        </aside>
       </section>
 
-      <section className="section panel">
+      <section id="precios" className="section panel pricing-section">
+        <div className="section-heading section-heading-wide">
+          <span className="eyebrow">{copy.nav.prices}</span>
+          <h2>{landing.pricing.title}</h2>
+          <p>{landing.pricing.text}</p>
+        </div>
+        <div className="product-row">
+          {landing.productCards.map((product, index) => (
+            <article key={product.title} className={`product-card accent-${product.accent}`}>
+              <span className="product-badge">{product.badge}</span>
+              <h3>{product.title}</h3>
+              <p>{product.subtitle}</p>
+              <p>{product.copy}</p>
+              <div className="price-block">
+                <strong>{product.price}</strong>
+                <span>{product.offer}</span>
+              </div>
+              <div className="hero-actions product-actions">
+                <Link to="/login" className="button product-primary">
+                  {product.cta}
+                </Link>
+                <Link to={index === 1 ? `/games/${copy.games[0].slug}` : '/games'} className="button product-secondary">
+                  {product.learnMore}
+                </Link>
+              </div>
+              <div className={`mockup mockup-${product.accent}`}>
+                {product.mockup === 'season' ? (
+                  <div className="mockup-content mockup-plus">
+                    <div className="mockup-season" />
+                  </div>
+                ) : product.mockup === 'quiz' ? (
+                  <div className="mockup-content mockup-one">
+                    <div className="mockup-question">{copy.landing.mockups.quizQuestion}</div>
+                    <div className="mockup-grid-quiz">
+                      {copy.landing.mockups.quizOptions.map((option) => (
+                        <span key={option}>{option}</span>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="mockup-content mockup-360">
+                    <div className="mockup-question">{copy.landing.mockups.chartQuestion}</div>
+                    <div className="mockup-chart">
+                      <span />
+                      <span />
+                      <span />
+                    </div>
+                  </div>
+                )}
+              </div>
+            </article>
+          ))}
+        </div>
+      </section>
+
+      <section id="juegos" className="section panel games-section">
         <div className="section-heading row-between">
           <div>
-            <span className="eyebrow">Catálogo</span>
-            <h2>Juegos disponibles en recuadros para jugar en línea o descargar.</h2>
+            <span className="eyebrow">{copy.landing.catalog.eyebrow}</span>
+            <h2>{copy.landing.catalog.title}</h2>
+            <p>{copy.landing.gameDetail.intro}</p>
           </div>
-          <Link to="/games" className="button secondary">Ir al catálogo</Link>
+          <Link to="/games" className="button secondary">
+            {copy.landing.catalog.cta}
+          </Link>
         </div>
         <div className="game-grid">
-          {gameCatalog.map((game) => (
+          {copy.games.map((game) => (
             <Link key={game.slug} to={`/games/${game.slug}`} className="game-card">
               <span className="game-tag">{game.type}</span>
               <h3>{game.title}</h3>
@@ -221,27 +249,86 @@ function Landing() {
         </div>
       </section>
 
+      <section id="historias" className="section panel stories-section">
+        <div className="section-heading section-heading-wide">
+          <span className="eyebrow">{copy.nav.stories}</span>
+          <h2>{landing.stories.title}</h2>
+          <p>{landing.stories.text}</p>
+        </div>
+        <div className="story-grid">
+          {landing.stories.items.map((story) => (
+            <article key={story.author} className="story-card">
+              <div className="story-quote">“{story.quote}”</div>
+              <div className="story-footer">
+                <div>
+                  <strong>{story.author}</strong>
+                  <span>{story.role}</span>
+                </div>
+                <span className="story-result">{story.result}</span>
+              </div>
+            </article>
+          ))}
+        </div>
+      </section>
+
+      <section id="acerca" className="section panel about-section">
+        <div className="section-heading section-heading-wide">
+          <span className="eyebrow">{copy.brand.name}</span>
+          <h2>{landing.about.title}</h2>
+          <p>{landing.about.text}</p>
+        </div>
+        <div className="about-layout">
+          <div className="about-copy">
+            <div className="hero-badges about-badges">
+              {landing.about.badges.map((badge) => (
+                <span key={badge}>{badge}</span>
+              ))}
+            </div>
+            <div className="timeline about-timeline">
+              {landing.steps.map((step, index) => (
+                <div key={step} className="timeline-item">
+                  <span>{index + 1}</span>
+                  <p>{step}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="about-grid">
+            {landing.about.cards.map((item) => (
+              <article key={item.title} className="about-card">
+                <h3>{item.title}</h3>
+                <p>{item.text}</p>
+              </article>
+            ))}
+          </div>
+        </div>
+      </section>
+
       <section className="section panel cta">
         <div>
-          <span className="eyebrow">Slogan</span>
-          <h2>Wigadu: la plataforma donde el contenido educativo se convierte en juego.</h2>
+          <span className="eyebrow">{copy.brand.name}</span>
+          <h2>{copy.brand.tagline}</h2>
         </div>
-        <Link to="/login" className="button primary">Crear cuenta</Link>
+        <Link to="/login" className="button primary">
+          {landing.heroCtas.primary}
+        </Link>
       </section>
     </>
   )
 }
 
 function GamesPage() {
+  const { copy } = useI18n()
+
   return (
     <section className="section panel">
       <div className="section-heading">
-        <span className="eyebrow">Catálogo completo</span>
-        <h1>Explora todos los juegos disponibles.</h1>
-        <p>Los juegos pueden abrirse en línea o prepararse para descarga según el módulo.</p>
+        <span className="eyebrow">{copy.landing.catalog.eyebrow}</span>
+        <h1>{copy.landing.catalog.title}</h1>
+        <p>{copy.landing.gameDetail.intro}</p>
       </div>
       <div className="game-grid">
-        {gameCatalog.map((game) => (
+        {copy.games.map((game) => (
           <Link key={game.slug} to={`/games/${game.slug}`} className="game-card">
             <span className="game-tag">{game.type}</span>
             <h3>{game.title}</h3>
@@ -259,14 +346,17 @@ function GamesPage() {
 
 function GameDetailPage() {
   const { slug } = useParams()
-  const game = gameCatalog.find((item) => item.slug === slug)
+  const { copy } = useI18n()
+  const game = copy.games.find((item) => item.slug === slug)
 
   if (!game) {
     return (
       <section className="section panel">
-        <h1>Juego no encontrado</h1>
-        <p>Revisa el catálogo o vuelve al inicio.</p>
-        <Link to="/games" className="button secondary">Volver al catálogo</Link>
+        <h1>{copy.landing.catalog.empty}</h1>
+        <p>{copy.landing.gameDetail.missingText}</p>
+        <Link to="/games" className="button secondary">
+          {copy.landing.catalog.back}
+        </Link>
       </section>
     )
   }
@@ -274,7 +364,7 @@ function GameDetailPage() {
   return (
     <section className="section panel game-detail">
       <div>
-        <span className="eyebrow">Vista de juego</span>
+        <span className="eyebrow">{copy.landing.gameDetail.viewLabel}</span>
         <h1>{game.title}</h1>
         <p>{game.description}</p>
         <div className="hero-badges">
@@ -285,100 +375,414 @@ function GameDetailPage() {
       </div>
       <div className="game-player">
         <div className="placeholder-stage">
-          <strong>Jugar en línea</strong>
-          <p>Espacio reservado para el motor del juego incrustado.</p>
+          <strong>{copy.landing.gameDetail.playLabel}</strong>
+          <p>{copy.landing.gameDetail.engineText}</p>
         </div>
         <div className="hero-actions">
-          <button className="button primary" type="button">Abrir juego</button>
-          <button className="button secondary" type="button">Descargar</button>
+          <button className="button primary" type="button">
+            {copy.landing.gameDetail.open}
+          </button>
+          <button className="button secondary" type="button">
+            {copy.landing.gameDetail.download}
+          </button>
         </div>
       </div>
     </section>
   )
 }
 
-function LoginPage() {
+function LoginPage({ user }) {
+  const { copy } = useI18n()
+  const navigate = useNavigate()
+  const [mode, setMode] = useState('signin')
+  const [displayName, setDisplayName] = useState('')
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [status, setStatus] = useState('')
+  const [error, setError] = useState('')
+  const [busyAction, setBusyAction] = useState('')
+
+  const ready = firebaseReady && auth
+  const isBusy = Boolean(busyAction)
+
+  useEffect(() => {
+    if (user?.displayName && !displayName) {
+      setDisplayName(user.displayName)
+    }
+  }, [displayName, user])
+
+  useEffect(() => {
+    if (!user?.email) return
+
+    const emailValue = user.email.toLowerCase()
+    navigate(adminAllowlist.has(emailValue) ? '/admin' : '/dashboard', { replace: true })
+  }, [navigate, user])
+
+  function goToSignedInArea(authedUser) {
+    const emailValue = authedUser?.email?.toLowerCase()
+    navigate(emailValue && adminAllowlist.has(emailValue) ? '/admin' : '/dashboard', { replace: true })
+  }
+
+  async function handleEmailSubmit(event) {
+    event.preventDefault()
+    if (!ready) {
+      setError(copy.auth.authMissing)
+      return
+    }
+
+    const action = mode === 'signup' ? 'signup' : 'signin'
+    setBusyAction(action)
+    setError('')
+    setStatus('')
+
+    try {
+      if (mode === 'signup') {
+        const credential = await createUserWithEmailAndPassword(auth, email, password)
+        if (displayName.trim()) {
+          await updateProfile(credential.user, { displayName: displayName.trim() })
+        }
+        await syncUserProfile(credential.user, 'password', true)
+        goToSignedInArea(credential.user)
+      } else {
+        const credential = await signInWithEmailAndPassword(auth, email, password)
+        await syncUserProfile(credential.user, 'password', false)
+        goToSignedInArea(credential.user)
+      }
+    } catch (authError) {
+      setError(getAuthErrorMessage(authError, copy))
+    } finally {
+      setBusyAction('')
+    }
+  }
+
+  async function handleProviderLogin(providerId) {
+    if (!ready) {
+      setError(copy.auth.authMissing)
+      return
+    }
+
+    const factory = providerFactories[providerId]
+    if (!factory) {
+      setError(copy.auth.providers.find((item) => item.id === providerId)?.hint || copy.auth.authMissing)
+      return
+    }
+
+    setBusyAction(providerId)
+    setError('')
+    setStatus('')
+
+    try {
+      const credential = await signInWithPopup(auth, factory())
+      await syncUserProfile(credential.user, providerId, false)
+      goToSignedInArea(credential.user)
+    } catch (authError) {
+      setError(getAuthErrorMessage(authError, copy, providerId))
+    } finally {
+      setBusyAction('')
+    }
+  }
+
+  async function handleResetPassword() {
+    if (!ready) {
+      setError(copy.auth.authMissing)
+      return
+    }
+
+    if (!email) {
+      setError(copy.auth.needEmail)
+      return
+    }
+
+    setBusyAction('reset')
+    setError('')
+    setStatus('')
+
+    try {
+      await sendPasswordResetEmail(auth, email)
+      setStatus(copy.auth.resetSuccess)
+    } catch (authError) {
+      setError(getAuthErrorMessage(authError, copy))
+    } finally {
+      setBusyAction('')
+    }
+  }
+
   return (
-    <section className="section panel auth-layout">
-      <div>
-        <span className="eyebrow">Acceso</span>
-        <h1>Entra a tu cuenta de Wigadu.</h1>
-        <p>Firebase Auth quedará conectado aquí para docentes, administradores y estudiantes.</p>
-      </div>
-      <form className="auth-card">
-        <label>
-          Email
-          <input type="email" placeholder="tu@email.com" />
-        </label>
-        <label>
-          Contraseña
-          <input type="password" placeholder="••••••••" />
-        </label>
-        <button className="button primary" type="button">Iniciar sesión</button>
-        <p className="muted">{firebaseReady ? 'Firebase configurado' : 'Pendiente de configurar Firebase'}</p>
-      </form>
-    </section>
+    <div className="auth-page">
+      <header className="auth-header">
+        <Link to="/" className="auth-brand">
+          <span className="auth-brand-mark">W</span>
+          <span className="auth-brand-name">{copy.brand.name}</span>
+        </Link>
+        <LanguageSelector variant="auth" />
+      </header>
+
+      <main className="auth-main">
+        <section className="auth-window">
+          <h1>{copy.auth.title}</h1>
+
+          <div className="social-login-grid">
+            {copy.auth.providers.map((item) => (
+              <button
+                key={item.id}
+                className={`social-btn social-${item.id} ${busyAction === item.id ? 'is-busy' : ''}`}
+                type="button"
+                onClick={() => handleProviderLogin(item.id)}
+                disabled={isBusy}
+                aria-busy={busyAction === item.id}
+              >
+                <span className="social-icon" aria-hidden="true">
+                  {busyAction === item.id ? <span className="button-spinner" /> : (
+                    <>
+                      {item.id === 'google' && 'G'}
+                      {item.id === 'microsoft' && '□'}
+                      {item.id === 'apple' && ''}
+                      {item.id === 'clever' && 'C'}
+                    </>
+                  )}
+                </span>
+                <span>{busyAction === item.id ? copy.auth.connecting : item.label}</span>
+              </button>
+            ))}
+          </div>
+
+          <button className={`sso-btn ${busyAction === 'sso' ? 'is-busy' : ''}`} type="button" disabled={isBusy}>
+            {busyAction === 'sso' ? copy.auth.connecting : copy.auth.sso}
+          </button>
+
+          <div className="auth-divider">
+            <span>{copy.auth.or}</span>
+          </div>
+
+          <form className="auth-form" onSubmit={handleEmailSubmit}>
+            {mode === 'signup' ? (
+              <label>
+                {copy.auth.displayName}
+                <input
+                  type="text"
+                  placeholder={copy.auth.displayNamePlaceholder}
+                  value={displayName}
+                  onChange={(event) => setDisplayName(event.target.value)}
+                  disabled={isBusy}
+                />
+              </label>
+            ) : null}
+
+            <label>
+              {copy.auth.email}
+              <input
+                type="email"
+                placeholder={copy.auth.emailPlaceholder}
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                disabled={isBusy}
+              />
+            </label>
+
+            <label>
+              {copy.auth.password}
+              <div className="password-field">
+                <input
+                  type="password"
+                  placeholder={copy.auth.passwordPlaceholder}
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  disabled={isBusy}
+                />
+                <span className="eye-icon">👁</span>
+              </div>
+            </label>
+
+            <button className="trouble-link" type="button" onClick={handleResetPassword} disabled={isBusy}>
+              {busyAction === 'reset' ? copy.auth.connecting : copy.auth.trouble}
+            </button>
+
+            <button className={`login-btn ${isBusy ? 'is-busy' : ''}`} type="submit" disabled={isBusy || !email || !password}>
+              <span className="button-label">
+                {busyAction === 'signup'
+                  ? copy.auth.creatingUser
+                  : busyAction === 'signin'
+                    ? copy.auth.signingIn
+                    : mode === 'signup'
+                      ? copy.auth.createUser
+                      : copy.auth.login}
+              </span>
+              {isBusy ? <span className="button-spinner" aria-hidden="true" /> : null}
+            </button>
+          </form>
+
+          <p className="signup-text">
+            {mode === 'signin' ? copy.auth.signupPrompt : copy.auth.signin}
+            {' '}
+            <button className="link-button" type="button" onClick={() => setMode(mode === 'signin' ? 'signup' : 'signin')}>
+              {mode === 'signin' ? copy.auth.createAccount : copy.auth.signin}
+            </button>
+          </p>
+
+          <p className="legal-text">{copy.auth.terms}</p>
+
+
+          <div className="auth-feedback">
+            <p className="muted">{firebaseReady ? copy.auth.authReady : copy.auth.authMissing}</p>
+            {copy.auth.providers.map((item) => (
+              <p key={item.id} className="muted small-note">
+                {item.hint}
+              </p>
+            ))}
+            {status ? <p className="status success">{status}</p> : null}
+            {error ? <p className="status error">{error}</p> : null}
+          </div>
+        </section>
+      </main>
+    </div>
   )
 }
 
-function DashboardPage() {
+function DashboardPage({ user, onSignOut }) {
+  const { copy } = useI18n()
+
+  if (!user) {
+    return (
+      <AccessNotice
+        eyebrow={copy.dashboard.eyebrow}
+        title={copy.dashboard.gateTitle}
+        text={copy.dashboard.gateText}
+        ctaLabel={copy.dashboard.gateCta}
+      />
+    )
+  }
+
   return (
     <section className="section panel dashboard">
-      <div>
-        <span className="eyebrow">Dashboard</span>
-        <h1>Administración principal de Wigadu.</h1>
-        <p>Vista base para usuarios, juegos publicados y actividad reciente.</p>
+      <div className="dashboard-header">
+        <div>
+          <span className="eyebrow">{copy.dashboard.eyebrow}</span>
+          <h1>{copy.dashboard.title}</h1>
+          <p>{copy.dashboard.text}</p>
+        </div>
+        <div className="session-card">
+          <strong>{user.displayName || copy.dashboard.accountLabel}</strong>
+          <span>{user.email}</span>
+          <button className="button secondary" type="button" onClick={onSignOut}>
+            {copy.nav.logout}
+          </button>
+        </div>
       </div>
       <div className="stats-grid">
-        <article><strong>24</strong><span>Actividades</span></article>
-        <article><strong>8</strong><span>Juegos activos</span></article>
-        <article><strong>1.2k</strong><span>Partidas</span></article>
-        <article><strong>96%</strong><span>Retención</span></article>
+        {copy.dashboard.stats.map((stat) => (
+          <article key={stat.label}>
+            <strong>{stat.value}</strong>
+            <span>{stat.label}</span>
+          </article>
+        ))}
       </div>
     </section>
   )
 }
 
-function AdminPage() {
+function AdminPage({ user, isAdminUser }) {
+  const { copy } = useI18n()
+
+  if (!user) {
+    return (
+      <AccessNotice
+        eyebrow={copy.admin.eyebrow}
+        title={copy.admin.gateTitle}
+        text={copy.admin.gateText}
+        ctaLabel={copy.admin.gateCta}
+      />
+    )
+  }
+
+  if (!isAdminUser) {
+    return (
+      <section className="section panel admin-page">
+        <div className="access-card locked-card">
+          <span className="eyebrow">{copy.admin.eyebrow}</span>
+          <h1>{copy.admin.lockedTitle}</h1>
+          <p>{copy.admin.lockedText}</p>
+          <p className="muted small-note">{copy.admin.lockedHint}</p>
+        </div>
+      </section>
+    )
+  }
+
   return (
     <section className="section panel admin-page">
       <div>
-        <span className="eyebrow">Administración</span>
-        <h1>Panel para gestionar usuarios, juegos y contenido.</h1>
-        <p>
-          Esta área quedará conectada a Firestore y Storage para administrar colecciones,
-          archivos y publicaciones.
-        </p>
+        <span className="eyebrow">{copy.admin.eyebrow}</span>
+        <h1>{copy.admin.title}</h1>
+        <p>{copy.admin.text}</p>
       </div>
       <div className="admin-columns">
         <article className="info-card">
-          <h3>Usuarios</h3>
-          <p>Roles, permisos y perfiles para docentes, estudiantes y admins.</p>
+          <h3>{copy.admin.users}</h3>
+          <p>{copy.admin.usersText}</p>
+          <p className="muted small-note">
+            {user ? `${copy.admin.sessionLabel}: ${user.email || user.uid}` : copy.admin.usersHint}
+          </p>
         </article>
         <article className="info-card">
-          <h3>Juegos</h3>
-          <p>Subida, organización y publicación de juegos por carpetas o módulos.</p>
+          <h3>{copy.admin.games}</h3>
+          <p>{copy.admin.gamesText}</p>
         </article>
         <article className="info-card">
-          <h3>Firebase</h3>
-          <p>{firebaseReady ? 'Configuración detectada.' : 'Configura variables de entorno para activar Firebase.'}</p>
+          <h3>{copy.admin.firebase}</h3>
+          <p>{firebaseReady ? copy.admin.firebaseReady : copy.admin.firebaseMissing}</p>
         </article>
       </div>
     </section>
   )
 }
 
-export default function App() {
-  return (
-    <Shell>
-      <Routes>
-        <Route path="/" element={<Landing />} />
-        <Route path="/games" element={<GamesPage />} />
-        <Route path="/games/:slug" element={<GameDetailPage />} />
-        <Route path="/login" element={<LoginPage />} />
-        <Route path="/dashboard" element={<DashboardPage />} />
-        <Route path="/admin" element={<AdminPage />} />
-      </Routes>
-    </Shell>
+function AppRoutes() {
+  const [user, setUser] = useState(null)
+  const location = useLocation()
+  const isAuthRoute = location.pathname.startsWith('/login')
+  const isAdminUser = Boolean(user?.email && adminAllowlist.has(user.email.toLowerCase()))
+
+  useEffect(() => {
+    if (!auth) return undefined
+
+    return onAuthStateChanged(auth, (nextUser) => {
+      setUser(nextUser)
+    })
+  }, [])
+
+  useEffect(() => {
+    if (!location.hash) return undefined
+
+    const timeoutId = window.setTimeout(() => {
+      const target = document.querySelector(location.hash)
+      target?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }, 0)
+
+    return () => window.clearTimeout(timeoutId)
+  }, [location.pathname, location.hash])
+
+  async function handleSignOut() {
+    if (!auth) return
+    await signOut(auth)
+  }
+
+  const routes = (
+    <Routes>
+      <Route path="/" element={<Landing />} />
+      <Route path="/games" element={<GamesPage />} />
+      <Route path="/games/:slug" element={<GameDetailPage />} />
+      <Route path="/login" element={<LoginPage user={user} />} />
+      <Route path="/dashboard" element={<DashboardPage user={user} onSignOut={handleSignOut} />} />
+      <Route path="/admin" element={<AdminPage user={user} isAdminUser={isAdminUser} />} />
+    </Routes>
   )
+
+  if (isAuthRoute && user) {
+    return <Navigate to={isAdminUser ? '/admin' : '/dashboard'} replace />
+  }
+
+  return isAuthRoute ? <>{routes}</> : <Shell user={user} isAdminUser={isAdminUser} onSignOut={handleSignOut}>{routes}</Shell>
+}
+
+export default function App() {
+  return <AppRoutes />
 }
